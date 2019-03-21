@@ -14,6 +14,18 @@
              (ice-9 regex)
              (ice-9 ftw))
 
+;;; TODO: rename: s/.*/+&+/
+(define +program-name+                  "syncdir.scm")
+(define +config-file-basename+              "syncdir.scm")
+(define +saved-times-file-basename+          ".sync-times")
+(define +unix-time-comparison-thresh+   2)
+(define +default-editor+                "vi")
+
+
+(define *config-alist* (make-parameter '()))
+(define *ignore-globs* (make-parameter '()))
+(define *verbose* (make-parameter #f))
+
 
 (define (glob-match glob s)
   (define bracket-expression-complement-char #\!)
@@ -97,121 +109,13 @@
                  (and=> (skip-to #\, g) next-branch))))
         (else => (cut match-char <> 1)))))
 
-
 (define (call-with-port port proc)
   (let ((res (proc port)))
     (close-port port)
     res))
 
-(define (parse-mtime datetime-string)        ; -> <number>, unix time
-  (car (mktime (car (strptime "%Y-%m-%d %H:%M:%S" datetime-string)))))
-
-(define local-mtime
-  (compose stat:mtime stat))
-
-(define (path-local? path)        ; -> <bool>
-  (not (and-let* ((i (string-index path #\:))
-                  ((not (string-index path #\/ 0 i)))))))
-
-(define sync-times-file-name ".sync-times")
-
-(define (saved-file-times-file local-path)
-  (string-append local-path "/" sync-times-file-name))
-
-(define (saved-file-times local-path)
-  (or (false-if-exception
-       (call-with-input-file
-           (saved-file-times-file local-path)
-         read))
-      '()))
-
-(define (write-saved-file-times times local-path)
-  (call-with-output-file
-      (saved-file-times-file local-path)
-    (cut write times <>)))
-
-(define (rclone-file-times rclone-path)
-  (call-with-port
-   (open-pipe*
-    OPEN_READ
-    "rclone" "lsf" "-R" "--files-only" "--format" "tp" rclone-path)
-   (lambda (pp)
-     (let loop ((lst '()))
-       (let ((l (get-line pp)))
-         (if (eof-object? l) lst
-             (let* ((idx (string-index l #\;))
-                    (t (parse-mtime (string-take l idx))))
-               (loop (acons (string-drop l (1+ idx)) t lst)))))))))
-
-(define (nth x) (lambda a (list-ref a x)))
-
-(define (local-file-list local-path)
-  (file-system-fold
-   (const #t)
-   (lambda (p s r) (cons p r))
-   (nth 2)
-   (nth 2)
-   (nth 2)
-   (nth 3)
-   '()
-   local-path))
-
-(define (local-file-times local-path)
-  (filter-map
-   (lambda (fn)
-     (and=> (false-if-exception (local-mtime fn))
-            (cut cons
-                 (string-trim-both
-                  (string-drop fn (string-length local-path))
-                  file-name-separator?)
-                 <>)))
-   (local-file-list local-path)))
-
-(define (file-times path)
-  ((if (path-local? path)
-       local-file-times
-       rclone-file-times)
-   path))
-
-(define unix-time-comparison-thresh 2)
-
 (define (unix-time~=? a b)
-  (<= (abs (- a b)) unix-time-comparison-thresh))
-
-;;; -> a->b | b->a | both | #f
-(define (sync-direction saved-time a-time b-time)
-  (cond
-   ((not a-time) 'b->a)
-   ((not b-time) 'a->b)
-   (else
-    (if (or (not saved-time)
-            (unix-time~=? a-time saved-time)
-            (unix-time~=? b-time saved-time))
-        (cond
-         ((unix-time~=? a-time b-time) #f)
-         ((> a-time b-time) 'a->b)
-         (else 'b->a))
-        'both))))
-
-(define* (all-files a-tab b-tab #:optional (ignore-glob-list '()))
-  (filter (lambda (fn)
-            (not (any (cute glob-match <> (basename fn))
-                      ignore-glob-list)))
-          (delete
-           sync-times-file-name
-           (lset-union string=?
-                       (map car a-tab)
-                       (map car b-tab)))))
-
-(define (rclone-copy-file rclone-path new-local-path)
-  (system* "rclone" "copyto" rclone-path new-local-path))
-
-(define copy rclone-copy-file)
-(define do-sync copy)
-
-(define (sync src dest)
-  (format #t "sync ~s -> ~s~%" src dest)
-  (do-sync src dest))
+  (<= (abs (- a b)) +unix-time-comparison-thresh+))
 
 (define (replace-in-string s l b)
   (regexp-substitute/global #f
@@ -219,91 +123,19 @@
                             s
                             'pre b 'post))
 
-(define (editor->merge-cmd editor)
-  (string-append editor " $A $B $O"))
 
-(define default-editor "vi")
+;;; Paths
 
-(define (merge a-orig b-orig config)
-  (format #t "merge ~s <-> ~s " a-orig b-orig)
-  (let ((a (tmpnam))
-        (b (tmpnam))
-        (o (tmpnam))
-        (merge-cmd (or (getenv "SYNCDIR_MERGE")
-                       (assq-ref config 'merge-cmd)
-                       (editor->merge-cmd
-                        (or (getenv "EDITOR")
-                            (getenv "VISUAL")
-                            default-editor)))))
-    (copy a-orig a)
-    (copy b-orig b)
-    (let* ((real-merge-cmd
-            (replace-in-string
-             (replace-in-string
-              (replace-in-string
-               merge-cmd
-               #\A a)
-              #\B b)
-             #\O o))
-           (st
-            (and (and=> (status:exit-val
-                         (system real-merge-cmd))
-                        zero?)
-                 (access? o R_OK))))
-      (delete-file a)
-      (delete-file b)
-      (if st
-          (begin
-            (display "done")
-            (newline)
-            o)
-          (begin
-            (false-if-exception
-             (delete-file o))
-            (display "cancelled")
-            (newline)
-            #f)))))
+(define (path-join x . l)
+  (string-join (cons x l) file-name-separator-string))
 
-(define (place-file-path place file)
-  (string-append place "/" file))
-
-;;; direction -> sync and record time
-;;; else-> copy both to /tmp and run merge
-;;; merge -> save this one to both places
-;;; else-> skip
-(define (process-file saved-tab a-tab b-tab a-place b-place fname config)
-  (let ((s (assoc-ref saved-tab fname))
-        (a (assoc-ref a-tab fname))
-        (b (assoc-ref b-tab fname))
-        (af (place-file-path a-place fname))
-        (bf (place-file-path b-place fname)))
-    (case (sync-direction s a b)
-      ((a->b)
-       (sync af bf)
-       a)
-      ((b->a)
-       (sync bf af)
-       b)
-      ((both)
-       (let ((out-fname (merge af bf config)))
-         (if out-fname
-             (begin
-               (copy out-fname af)
-               (copy out-fname bf)
-               (let ((mtime (stat:mtime (stat out-fname))))
-                 (delete-file out-fname)
-                 mtime))
-             s)))
-      (else s))))
-
-
-(define (string-starts-with? s ss)
-  (and (>= (string-length s) (string-length ss))
-       (zero? (string-contains s ss 0 (string-length ss)))))
+(define (path-local? path)        ; -> <bool>
+  (not (and-let* ((i (string-index path #\:))
+                  ((not (string-index path #\/ 0 i)))))))
 
 (define (relative-path path)
   (let ((cwd (getcwd)))
-    (if (string-starts-with? path cwd)
+    (if (string-prefix? cwd path)
         (string-copy path (+ (string-length cwd)
                              (if (file-name-separator?
                                   (string-ref
@@ -330,7 +162,14 @@
                          passwd:dir)))
         (if dir (string-append dir suffix) path))))
 
-(define config-file-name "syncdir.scm")
+
+;;; Command templates
+
+(define (editor->merge-cmd editor)
+  (string-append editor " $A $B $O"))
+
+
+;;; Config file
 
 (define (config-path)
   (string-append
@@ -341,7 +180,7 @@
         file-name-separator-string
         ".config"
         file-name-separator-string))
-   config-file-name))
+   +config-file-basename+))
 
 (define (read-config)
   (or (false-if-exception
@@ -350,16 +189,204 @@
          read))
       '()))
 
-(define program-name "syncdir.scm")
+
+;;; Saved times file
+
+(define (saved-times-file-name local-path)
+  (path-join local-path +saved-times-file-basename+))
+
+(define (read-saved-times local-path)
+  (or (false-if-exception
+       (call-with-input-file
+           (saved-times-file-name local-path)
+         read))
+      '()))
+
+(define (write-saved-times times local-path)
+  (call-with-output-file
+      (saved-times-file-name local-path)
+    (cut format <> "~s~%" times)))
+
+
+;;; Modification times
+
+(define (parse-mtime datetime-string)        ; -> <number>, unix time
+  (car (mktime (car (strptime "%Y-%m-%d %H:%M:%S" datetime-string)))))
+
+
+;;; rclone
+
+(define (rclone-file-times rclone-path)
+  (call-with-port
+   (open-pipe*
+    OPEN_READ
+    "rclone" "lsf" "-R" "--files-only" "--format" "tp" rclone-path)
+   (lambda (pp)
+     (let loop ((lst '()))
+       (let ((l (get-line pp)))
+         (if (eof-object? l) lst
+             (let* ((idx (string-index l #\;))
+                    (t (parse-mtime (string-take l idx))))
+               (loop (acons (string-drop l (1+ idx)) t lst)))))))))
+
+(define (rclone-copy-file src-rclone-path dest-rclone-path)
+  (system* "rclone" "copyto" src-rclone-path dest-rclone-path))
+
+
+;;; Local files
+
+(define local-mtime
+  (compose stat:mtime stat))
+
+(define (local-file-list local-path)
+  (define (nth x)
+    (lambda a (list-ref a x)))
+  (file-system-fold
+   (const #t)
+   (lambda (p s r) (cons p r))
+   (nth 2)
+   (nth 2)
+   (nth 2)
+   (nth 3)
+   '()
+   local-path))
+
+(define (local-file-times local-path)
+  (filter-map
+   (lambda (fn)
+     (and=> (false-if-exception (local-mtime fn))
+            (cut cons
+                 (string-trim-both
+                  (string-drop fn (string-length local-path))
+                  file-name-separator?)
+                 <>)))
+   (local-file-list local-path)))
+
+
+;;; Rules
+
+;;; -> a->b | b->a | both | #f
+(define (sync-direction saved-time a-time b-time)
+  (cond
+   ((not a-time) 'b->a)
+   ((not b-time) 'a->b)
+   (else
+    (if (or (not saved-time)
+            (unix-time~=? a-time saved-time)
+            (unix-time~=? b-time saved-time))
+        (cond
+         ((unix-time~=? a-time b-time) #f)
+         ((> a-time b-time) 'a->b)
+         (else 'b->a))
+        'both))))
+
+(define* (all-files a-tab b-tab)
+  (filter (lambda (fn)
+            (not (any (cute glob-match <> (basename fn))
+                      (*ignore-globs*))))
+          (delete
+           +saved-times-file-basename+
+           (lset-union string=?
+                       (map car a-tab)
+                       (map car b-tab)))))
+
+
+;;; Operations
+
+(define (file-times path)
+  ((if (path-local? path)
+       local-file-times
+       rclone-file-times)
+   path))
+
+(define (copy a b)
+  (when (*verbose*)
+    (format #t "copy ~s ~s~%" a b))
+  (rclone-copy-file a b))
+
+(define (merge a-orig b-orig)
+  (when (*verbose*)
+    (format #t "merge ~s ~s... " a-orig b-orig))
+  (let ((a (tmpnam))
+        (b (tmpnam))
+        (o (tmpnam))
+        (merge-cmd (or (getenv "SYNCDIR_MERGE")
+                       (assq-ref (*config-alist*) 'merge-cmd)
+                       (editor->merge-cmd
+                        (or (getenv "EDITOR")
+                            (getenv "VISUAL")
+                            +default-editor+)))))
+    (copy a-orig a)
+    (copy b-orig b)
+    (let* ((real-merge-cmd
+            (replace-in-string
+             (replace-in-string
+              (replace-in-string
+               merge-cmd
+               #\A a)
+              #\B b)
+             #\O o))
+           (st
+            (and (and=> (status:exit-val
+                         (system real-merge-cmd))
+                        zero?)
+                 (access? o R_OK))))
+      (delete-file a)
+      (delete-file b)
+      (if st
+          (begin
+            (when (*verbose*)
+              (display "done")
+              (newline))
+            o)
+          (begin
+            (false-if-exception
+             (delete-file o))
+            (when (*verbose*)
+              (display "cancelled")
+              (newline))
+            #f)))))
+
+
+;;; Control flow
+
+;;; if direction not #f, sync and record time
+;;; else, copy both as tmp files and run merge
+;;; if merge successful, save this one to both places
+;;; else, skip this file
+(define (process-file saved-tab a-tab b-tab a-place b-place fname)
+  (let ((s (assoc-ref saved-tab fname))
+        (a (assoc-ref a-tab fname))
+        (b (assoc-ref b-tab fname))
+        (af (path-join a-place fname))
+        (bf (path-join b-place fname)))
+    (case (sync-direction s a b)
+      ((a->b)
+       (copy af bf)
+       a)
+      ((b->a)
+       (copy bf af)
+       b)
+      ((both)
+       (let ((out-fname (merge af bf)))
+         (if out-fname
+             (begin
+               (copy out-fname af)
+               (copy out-fname bf)
+               (let ((mtime (stat:mtime (stat out-fname))))
+                 (delete-file out-fname)
+                 mtime))
+             s)))
+      (else s))))
 
 (define (die fmt . args)
   (format (current-error-port)
           "~a: ~k~%"
-          program-name
+          +program-name+
           fmt args)
   (exit 1))
 
-(define (run-sync config . paths)
+(define (run-sync . paths)
   (let-values (((local remote) (partition path-local? paths)))
     (if (or (null? local) (null? remote))
         (die "error: there must be one local and one remote path")
@@ -369,35 +396,39 @@
                   (expand-user-dir (car local)))))
                (a local-path)
                (b (car remote))
-               (saved-tab (saved-file-times local-path))
-               (ignore-globs (or (assq-ref config 'ignore-globs) '()))
-               (at (file-times a))
-               (bt (file-times b))
+               (at (local-file-times a))
+               (bt (rclone-file-times b))
+               (st (read-saved-times local-path))
                (new-saved-tab
                 (let loop ((new-tab '())
-                           (files (all-files at bt ignore-globs)))
+                           (files (all-files at bt)))
                   (if (null? files) new-tab
                       (let* ((f (car files))
-                             (new-times (process-file
-                                         saved-tab at bt a b f
-                                         config)))
+                             (new-times
+                              (process-file
+                               st at bt a b f)))
                         (loop (acons f new-times new-tab)
                               (cdr files)))))))
-          (write-saved-file-times new-saved-tab local-path)))))
+          (write-saved-times new-saved-tab local-path)))))
 
 (define (main argv)
   (let ((len (length argv))
         (config (read-config)))
-    (cond
-     ((= len 3)
-      (apply run-sync config (cdr argv)))
-     ((= len 2)
-      (let* ((path-id (string->symbol (second argv)))
-             (entry
-              (and=> (assq-ref config 'paths)
-                     (cut assq path-id <>))))
-        (if entry (apply run-sync config (cdr entry))
-            (die "error: preconfigured path ~a not found"
-                 path-id))))
-     (else
-      (die "usage: path-a path-b")))))
+    (parameterize
+        ((*config-alist* config)
+         (*verbose* #t)                 ; keep old behavior
+         (*ignore-globs*
+          (assq-ref config 'ignore-globs)))        
+      (cond
+       ((= len 3)
+        (apply run-sync (cdr argv)))
+       ((= len 2)
+        (let* ((path-id (string->symbol (second argv)))
+               (entry
+                (and=> (assq-ref config 'paths)
+                       (cut assq path-id <>))))
+          (if entry (apply run-sync (cdr entry))
+              (die "error: preconfigured path ~a not found"
+                   path-id))))
+       (else
+        (die "usage: path-a path-b"))))))
