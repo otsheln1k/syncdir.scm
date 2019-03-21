@@ -431,4 +431,5 @@
               (die "error: preconfigured path ~a not found"
                    path-id))))
        (else
-        (die "usage: path-a path-b"))))))
+        (format #t "usage:~%  ~a path-a path-b~%  ~a preconf-name~%"
+                +program-name+ +program-name+))))))
