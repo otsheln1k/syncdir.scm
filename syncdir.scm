@@ -16,8 +16,8 @@
 
 ;;; TODO: rename: s/.*/+&+/
 (define +program-name+                  "syncdir.scm")
-(define +config-file-basename+              "syncdir.scm")
-(define +saved-times-file-basename+          ".sync-times")
+(define +config-file-basename+          "syncdir.scm")
+(define +saved-times-file-basename+     ".sync-times")
 (define +unix-time-comparison-thresh+   2)
 (define +default-editor+                "vi")
 
@@ -129,7 +129,7 @@
 (define (path-join x . l)
   (string-join (cons x l) file-name-separator-string))
 
-(define (path-local? path)        ; -> <bool>
+(define (path-local? path)              ; -> <bool>
   (not (and-let* ((i (string-index path #\:))
                   ((not (string-index path #\/ 0 i)))))))
 
