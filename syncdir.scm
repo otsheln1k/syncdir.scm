@@ -478,12 +478,7 @@
                             +default-editor+)))))
     (silent-copy a-orig a)
     (silent-copy b-orig b)
-    (let* ((real-merge-cmd ((lambda (cmd)
-                              (format (current-error-port)
-                                      "command: ~s~%"
-                                      cmd)
-                              cmd)
-                            (expand-merge-cmd merge-cmd a b o)))
+    (let* ((real-merge-cmd (expand-merge-cmd merge-cmd a b o))
            (st (and (and=>
                      (status:exit-val
                       (system real-merge-cmd)) zero?)

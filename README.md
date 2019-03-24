@@ -53,8 +53,14 @@ itself) are supported in globs.
 
 ## Command syntax
 
-Commands may be rather complicated and require large amounts of
-escaping for shells and other programs which will interpret the
+Commands are text into which variables are inserted on each
+invocation. The variables (keys) are usually file names. Resulting
+command is then passed to the shell (with Guile's `system` procedure).
+Special characters in inserted text are escaped according to the
+escaping rules for that command.
+
+Commands may be rather complicated and require large amounts of file
+name escaping for shells and other programs which will interpret the
 command (e.g. when passing a command to Emacs with `emacsclient -c`).
 Thus, rather complex escaping rules might be required to prevent
 unexpected results when dealing with unusual file names (including
@@ -69,7 +75,7 @@ The exact syntax for commands is as follows:
 ([([base-name] { escaped-chars-string special-rule ...
                  | rule-name })]
  { command-string
-   | { command-part | variable } })
+   | { command-part | variable } ... })
 ```
 `base-name` and `rule-name` are predefined rule names. The following
 predefined rules exist:
@@ -95,7 +101,7 @@ specified).
 
 `command-string` is a command string in which key (variable)
 references in form `$key` or `${key}` will be replaced with the
-variable's value and escaped according to current escaping rules.
+variable's value escaped according to this command's escaping rules.
 
 `command-part`s are a string. They will be passed to the shell as-is.
 `variable`s are symbols which will be replaced with their escaped
