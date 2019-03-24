@@ -459,22 +459,31 @@
     (format #t "copy ~s ~s~%" a b))
   (rclone-copy-file a b))
 
+(define silent-copy rclone-copy-file)
+
 (define (merge a-orig b-orig)
   (when (*verbose*)
     (format #t "merge ~s ~s... " a-orig b-orig))
   (let ((a (tmpnam))
         (b (tmpnam))
         (o (tmpnam))
-        (merge-cmd (or (and=> (getenv "SYNCDIR_MERGE")
-                              string->cmd-template)
+        (merge-cmd (or (and-let*
+                        ((e (getenv "SYNCDIR_MERGE"))
+                         ((not (string-null? e))))
+                        (string->cmd-template e))
                        (assq-ref (*config-alist*) 'merge-cmd)
                        (editor->merge-cmd
                         (or (getenv "EDITOR")
                             (getenv "VISUAL")
                             +default-editor+)))))
-    (copy a-orig a)
-    (copy b-orig b)
-    (let* ((real-merge-cmd (expand-merge-cmd merge-cmd a b o))
+    (silent-copy a-orig a)
+    (silent-copy b-orig b)
+    (let* ((real-merge-cmd ((lambda (cmd)
+                              (format (current-error-port)
+                                      "command: ~s~%"
+                                      cmd)
+                              cmd)
+                            (expand-merge-cmd merge-cmd a b o)))
            (st (and (and=>
                      (status:exit-val
                       (system real-merge-cmd)) zero?)
@@ -517,8 +526,8 @@
        (let ((out-fname (merge af bf)))
          (if out-fname
              (begin
-               (copy out-fname af)
-               (copy out-fname bf)
+               (silent-copy out-fname af)
+               (silent-copy out-fname bf)
                (let ((mtime (stat:mtime (stat out-fname))))
                  (delete-file out-fname)
                  mtime))
