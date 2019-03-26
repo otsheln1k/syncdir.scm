@@ -198,31 +198,49 @@
                         (format #f "\\x~x" (char->integer c))))))
    "" s))
 
-(define (string-escape-for-rules s r)
+(define (resolve-rules r)
   (define (symbol->escaping sym)
     (or (assq-ref +shell-escaping-rules+ sym)
         (error "Unknown escaping rule" sym)))
-  (let-values (((base r)
-                (if (and (pair? r)
-                         (symbol? (car r)))
-                    (values (symbol->escaping (car r))
-                            (cdr r))
-                    (values (cons char-set:empty '())
-                            r))))
-    (let ((other
-           (cond
-            ((not r)
-             (list char-set:empty))
-            ((symbol? r)
-             (symbol->escaping r))
-            ((list? r) (cons (string->char-set (car r)) (cdr r)))
-            (else
-             (error
-              "Escaping rules should be #f, symbol or list, not" r)))))
-      (string-escape
-       s
-       (char-set-union (car base) (car other))
-       (append (cdr base) (cdr other))))))
+  (define (*->char-set x)
+    (cond
+     ((char-set? x) x)
+     ((string? x) (string->char-set x))
+     ((list? x) (list->char-set x))
+     (else
+      (error
+       "Escaped charset must be string, list or charset, not" x))))
+  (define (*->escaping x)
+    (cond
+     ((or (not x) (null? x))
+      (cons char-set:empty '()))
+     ;((symbol? x)
+     ; (car+cdr (symbol->escaping x)))
+     ((list? x)
+      (cons (*->char-set (car x)) (cdr x)))
+     (else
+      (error
+       "Bad escaping rule" x))))
+  (let*-values
+      (((base this)
+        (if (and (pair? r)
+                 (symbol? (car r)))
+            (values (resolve-rules (symbol->escaping (car r)))
+                    (resolve-rules (cdr r)))
+            (values #f (*->escaping r)))))
+    (if base
+        (let ((sp (append (cdr base) (cdr this))))
+          (cons (char-set-difference
+                 (char-set-union (car base) (car this))
+                 (list->char-set (map car sp)))
+                sp))
+        this)))
+
+(define (string-escape-for-rules s r)
+  (call-with-values
+      (lambda ()
+        (car+cdr (resolve-rules r)))
+    (cut string-escape s <> <>)))
 
 
 ;;; Command templates

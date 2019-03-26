@@ -1,6 +1,6 @@
-# `syncdir.scm`
+# syncdir.scm
 
-An [`rclone`][rclone] wrapper for two-way synchronization.
+An [rclone][rclone] wrapper for two-way synchronization.
 
 Syncs files in a local and remote directory, saving a time stamp for
 each file into a file `.sync-times` in the local directory. If both
@@ -35,7 +35,7 @@ that's what its command line looks like according to documentation):
   (org "~/org" "remote:org"))
  (ignore-globs "*~" ".#*#")
  (merge-cmd
-   "kdiff3" a b "-o" output))
+  "kdiff3" a b "-o" output))
 ```
 
 Leading tilde is supported in filenames (both "~/..." and
@@ -72,8 +72,8 @@ built, and the defaults are usually enough.
 
 The exact syntax for commands is as follows:
 ```
-([([base-name] { escaped-chars-string special-rule ...
-                 | rule-name })]
+([(base-name ... { escaped-chars-string special-rule ...
+                   | rule-name })]
  { command-string
    | { command-part | variable } ... })
 ```
@@ -88,13 +88,17 @@ predefined rules exist:
 - `bourne-shell-single-quotes` (only escape single quotes by putting
   them inside double quotes: `' -> '"'"'`: close single quotes, write
   a single quote inside double quotes and reopen single quotes)
-- `#f` (no escaping)
+
+`rule-name` can also be:
 - `default` (equivalent to `bourne-shell-double-quotes` for string
-  rules or to `bourne-shell` for list rules)
+  commands or to `bourne-shell` for list commands; only valid when no
+  base rules are specified)
+- `#f` (no escaping)
 
 `escaped-chars-string` is a string of characters which will be escaped
 with a backslash. `special-rule`s are pairs of character and string,
 where each occurence of character will be substituted with the string.
+Special rules take precedence over escaped char set.
 
 The escaping rule is applied on top of rule `base-name` (if
 specified).
