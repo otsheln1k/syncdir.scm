@@ -44,6 +44,7 @@
 (define *config-alist* (make-parameter '()))
 (define *ignore-globs* (make-parameter '()))
 (define *verbose* (make-parameter #f))
+(define *merge-command* (make-parameter '()))
 
 
 (define (glob-match glob s)
@@ -484,19 +485,11 @@
     (format #t "merge ~s ~s... " a-orig b-orig))
   (let ((a (tmpnam))
         (b (tmpnam))
-        (o (tmpnam))
-        (merge-cmd (or (and-let*
-                        ((e (getenv "SYNCDIR_MERGE"))
-                         ((not (string-null? e))))
-                        (string->cmd-template e))
-                       (assq-ref (*config-alist*) 'merge-cmd)
-                       (editor->merge-cmd
-                        (or (getenv "EDITOR")
-                            (getenv "VISUAL")
-                            +default-editor+)))))
+        (o (tmpnam)))
     (silent-copy a-orig a)
     (silent-copy b-orig b)
-    (let* ((real-merge-cmd (expand-merge-cmd merge-cmd a b o))
+    (let* ((real-merge-cmd
+            (expand-merge-cmd (*merge-command*) a b o))
            (st (and (and=>
                      (status:exit-val
                       (system real-merge-cmd)) zero?)
@@ -586,18 +579,43 @@
         ((*config-alist* config)
          (*verbose* #t)                 ; keep old behavior
          (*ignore-globs*
-          (assq-ref config 'ignore-globs)))
+          (or (assq-ref config 'ignore-globs) '()))
+         (*merge-command*
+          (or (and-let*
+               ((e (getenv "SYNCDIR_MERGE"))
+                ((not (string-null? e))))
+               (cons 'env (string->cmd-template e)))
+              (and=>
+               (assq-ref (*config-alist*) 'merge-cmd)
+               (cut cons 'config <>))
+              (cons
+               'editor
+               (editor->merge-cmd
+                (or (getenv "EDITOR")
+                    (getenv "VISUAL")
+                    +default-editor+))))))
       (cond
        ((= len 3)
         (apply run-sync (cdr argv)))
        ((= len 2)
         (let* ((path-id (string->symbol (second argv)))
-               (entry
-                (and=> (assq-ref config 'paths)
-                       (cut assq path-id <>))))
-          (if entry (apply run-sync (cdr entry))
-              (die "error: preconfigured path ~a not found"
-                   path-id))))
+               (paths (assq-ref config 'paths))
+               (entry (or (and=> paths (cut assq path-id <>))
+                          (die "error: preconfigured path ~a not found"
+                               path-id)))
+               (cfg (cdddr entry)))
+          (parameterize
+              ((*ignore-globs*
+                (append (*ignore-globs*)
+                        (or (assq-ref cfg 'ignore-globs) '())))
+               (*merge-command*
+                (let ((old (*merge-command*)))
+                  (cond
+                   ((eq? (car old) 'env) old)
+                   ((assq-ref cfg 'merge-cmd)
+                    => (cut cons 'override <>))
+                   (else old)))))
+            (apply run-sync (take (cdr entry) 2)))))
        (else
         (format #t "usage:~%  ~a path-a path-b~%  ~a preconf-name~%"
                 +program-name+ +program-name+))))))

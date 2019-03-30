@@ -19,14 +19,13 @@ association list. The following keys are meaningful:
 - `ignore-globs`: a list of [globs](#glob-syntax) with which to match
   filenames. All files whose name matches at least one of this globs
   is skipped by `syncdir.scm`. Example: `("*~" "*.tmp" ".*.sw?")`.
-- Merge command is specified in the config at key `merge-cmd`. It uses
-  the [command syntax](#command-syntax) with keys `a`, `b` and
-  `output` as the 2 files being merged and the output file
-  respectively. Enivoronment variable `SYNCDIR_MERGE` overrides this
-  config option. It uses the same syntax as the `cdr` part of
-  `merge-cmd` config entry. If neither is specified, value of `VISUAL`
-  or `EDITOR` (defaulting to `"vi"`) is used, with the 3 file names
-  appended.
+- `merge-cmd`: merge command in the [command syntax](#command-syntax)
+  with keys `a`, `b` and `output` as the 2 files being merged and the
+  output file respectively. Enivoronment variable `SYNCDIR_MERGE`
+  overrides this config option. It uses the same syntax as the `cdr`
+  part of `merge-cmd` config entry. If neither is specified, value of
+  `VISUAL` or `EDITOR` (defaulting to `"vi"`) is used, with the 3 file
+  names appended.
 
 For example, a config file may look like this (I don't use KDiff3, but
 that's what its command line looks like according to documentation):
@@ -40,6 +39,14 @@ that's what its command line looks like according to documentation):
 
 Leading tilde is supported in filenames (both "~/..." and
 "~user/...").
+
+All keys can be overriden in paths (except `paths`). `ignore-globs`
+list is appended, while `merge-cmd` is replaced completely. To
+override/extend a particular key, add a pair `(key . new-value)` to
+the path list:
+```scheme
+(path-name "/local/path" "remote:path" (ignore-globs "more"))
+```
 
 ## Glob syntax
 
