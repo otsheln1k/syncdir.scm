@@ -114,8 +114,17 @@ specified).
 references in form `$key` or `${key}` will be replaced with the
 variable's value escaped according to this command's escaping rules.
 
-`command-part`s are a string. They will be passed to the shell as-is.
-`variable`s are symbols which will be replaced with their escaped
-string values. Strings in the resulting list are concatenated.
+`command-part`s are strings which will be passed kept as they are.
+`variable`s are symbols which will be replaced with their string
+values escaped according to the specified rules. Strings in the list
+resulting from variable substitution are concatenated and passed to
+the shell.
+
+## Dummy mode
+
+There is a dummy mode in which files aren't copied and merges aren't
+run. It can be used to quickly check what's going to be synchronized.
+Currently the only way to enable dummy mode is to specify an
+environment variable `SYNCDIR_DUMMY`.
 
 [rclone]: https://rclone.org/

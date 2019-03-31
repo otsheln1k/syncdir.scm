@@ -41,10 +41,10 @@
   'bourne-shell)
 
 
-(define *config-alist* (make-parameter '()))
 (define *ignore-globs* (make-parameter '()))
-(define *verbose* (make-parameter #f))
-(define *merge-command* (make-parameter '()))
+(define *verbose?* (make-parameter #f))
+(define *merge-command* (make-parameter #f))
+(define *dummy?* (make-parameter #f))
 
 
 (define (glob-match glob s)
@@ -81,7 +81,8 @@
           (let-values (((s result)
                         (if (char=? (string-ref s 0)
                                     bracket-expression-complement-char)
-                            (values (string-drop s 1) char-set-complement)
+                            (values (string-drop s 1)
+                                    char-set-complement)
                             (values s identity))))
             (let parse-more ((cs (char-set)) (s s) (prev #f))
               (if (string-null? s)
@@ -91,9 +92,11 @@
                              (char=? c bracket-expression-range-char)
                              (>= (string-length s) 2))
                         (parse-more
-                         (char-set-union cs (ucs-range->char-set
-                                             (char->integer prev)
-                                             (1+ (char->integer (string-ref s 1)))))
+                         (char-set-union
+                          cs
+                          (ucs-range->char-set
+                           (char->integer prev)
+                           (1+ (char->integer (string-ref s 1)))))
                          (string-drop s 2)
                          #f)
                         (parse-more
@@ -104,21 +107,22 @@
       (string-null? s)
       (case (string-ref glob 0)
         ((#\?) (and (not (string-null? s))
-                      (glob-match (string-drop glob 1) (string-drop s 1))))
+                    (glob-match (string-drop glob 1)
+                                (string-drop s 1))))
         ((#\*) (or (glob-match (string-drop glob 1) s)
-                     (and (not (string-null? s))
+                   (and (not (string-null? s))
                         (glob-match glob (string-drop s 1)))))
         ((#\[) (and=> (string-index glob #\] 2)
-                        (lambda (end-idx)
-                          (not (string-null? s))
-                          (char-set-contains?
-                           (bracket-expression->char-set
+                      (lambda (end-idx)
+                        (not (string-null? s))
+                        (char-set-contains?
+                         (bracket-expression->char-set
                           (string-take glob (1+ end-idx)))
-                           (string-ref s 0))
-                          (glob-match (string-drop glob (1+ end-idx))
+                         (string-ref s 0))
+                        (glob-match (string-drop glob (1+ end-idx))
                                     (string-drop s 1)))))
         ((#\\) (and (>= (string-length glob) 2)
-                      (match-char (string-ref glob 1) 2)))
+                    (match-char (string-ref glob 1) 2)))
         ((#\, #\}) s)
         ((#\{)
          (let next-branch ((g (string-drop glob 1)))
@@ -126,13 +130,8 @@
                       (lambda (s)
                         (and (string? s)
                              (glob-match (skip-to #\}) s))))
-                 (and=> (skip-to #\, g) next-branch))))
+               (and=> (skip-to #\, g) next-branch))))
         (else => (cut match-char <> 1)))))
-
-(define (call-with-port port proc)
-  (let ((res (proc port)))
-    (close-port port)
-    res))
 
 (define (unix-time~=? a b)
   (<= (abs (- a b)) +unix-time-comparison-thresh+))
@@ -141,11 +140,16 @@
 ;;; Paths
 
 (define (path-join x . l)
-  (string-join (cons x l) file-name-separator-string))
+  (string-join (map (cut string-trim-right <> file-name-separator?)
+                    (cons x l))
+               file-name-separator-string))
 
 (define (path-local? path)              ; -> <bool>
   (not (and-let* ((i (string-index path #\:))
                   ((not (string-index path #\/ 0 i)))))))
+
+(define (both-local? . paths)
+  (every path-local? paths))
 
 (define (relative-path path)
   (let ((cwd (getcwd)))
@@ -166,7 +170,8 @@
   (if (or (string-null? path)
           (not (char=? (string-ref path 0) #\~)))
       path
-      (let* ((prefix-len (string-skip path (negate file-name-separator?)))
+      (let* ((prefix-len
+              (string-skip path (negate file-name-separator?)))
              (username (string-drop (string-take path prefix-len) 1))
              (suffix (string-drop path prefix-len))
              (dir (and=> (false-if-exception
@@ -199,7 +204,7 @@
                         (format #f "\\x~x" (char->integer c))))))
    "" s))
 
-(define (resolve-rules r)
+(define (resolve-escaping-rules r)
   (define (symbol->escaping sym)
     (or (assq-ref +shell-escaping-rules+ sym)
         (error "Unknown escaping rule" sym)))
@@ -215,8 +220,9 @@
     (cond
      ((or (not x) (null? x))
       (cons char-set:empty '()))
-     ;((symbol? x)
-     ; (car+cdr (symbol->escaping x)))
+     ((symbol? x)
+      (resolve-escaping-rules
+       (symbol->escaping x)))
      ((list? x)
       (cons (*->char-set (car x)) (cdr x)))
      (else
@@ -226,8 +232,10 @@
       (((base this)
         (if (and (pair? r)
                  (symbol? (car r)))
-            (values (resolve-rules (symbol->escaping (car r)))
-                    (resolve-rules (cdr r)))
+            (values (resolve-escaping-rules
+                     (symbol->escaping (car r)))
+                    (resolve-escaping-rules
+                     (cdr r)))
             (values #f (*->escaping r)))))
     (if base
         (let ((sp (append (cdr base) (cdr this))))
@@ -240,7 +248,7 @@
 (define (string-escape-for-rules s r)
   (call-with-values
       (lambda ()
-        (car+cdr (resolve-rules r)))
+        (car+cdr (resolve-escaping-rules r)))
     (cut string-escape s <> <>)))
 
 
@@ -391,17 +399,22 @@
 ;;; rclone
 
 (define (rclone-file-times rclone-path)
-  (call-with-port
-   (open-pipe*
-    OPEN_READ
-    "rclone" "lsf" "-R" "--files-only" "--format" "tp" rclone-path)
-   (lambda (pp)
-     (let loop ((lst '()))
-       (let ((l (get-line pp)))
-         (if (eof-object? l) lst
-             (let* ((idx (string-index l #\;))
-                    (t (parse-mtime (string-take l idx))))
-               (loop (acons (string-drop l (1+ idx)) t lst)))))))))
+  (let* ((pp
+          (open-pipe*
+           OPEN_READ
+           "rclone" "lsf" "-R" "--files-only"
+           "--format" "tp" rclone-path))
+         (times
+          (let loop ((lst '()))
+            (let ((l (get-line pp)))
+              (if (eof-object? l) lst
+                  (let* ((idx (string-index l #\;))
+                         (t (parse-mtime (string-take l idx))))
+                    (loop
+                     (acons (string-drop l (1+ idx)) t lst))))))))
+    (unless (zero? (status:exit-val (close-pipe pp)))
+      (error "`rclone lsf' returned non-zero"))
+    times))
 
 (define (rclone-copy-file src-rclone-path dest-rclone-path)
   (system* "rclone" "copyto" src-rclone-path dest-rclone-path))
@@ -467,78 +480,170 @@
 
 ;;; Operations
 
-(define (file-times path)
-  ((if (path-local? path)
-       local-file-times
-       rclone-file-times)
-   path))
+(define* (copy-one-file src dest #:optional (name #f))
+  (define (make-filename dir-or-path)
+    (if name (path-join dir-or-path name) dir-or-path))
+  ((if (both-local? src dest)
+       copy-file
+       rclone-copy-file)
+   (make-filename src)
+   (make-filename dest)))
 
-(define (copy a b)
-  (when (*verbose*)
-    (format #t "copy ~s ~s~%" a b))
-  (rclone-copy-file a b))
+(define (copy-files src dest names)
+  (if (both-local? src dest)
+      (for-each (lambda (n)
+                  (copy-file (path-join src n)
+                             (path-join dest n)))
+                names)
+      (let ((port (open-output-pipe
+                   (expand-cmd-list
+                    'bourne-shell
+                    '("rclone copy --files-from /dev/stdin" src dest)
+                    `((src . ,src)
+                      (dest . ,dest))))))
+        ;; prepend slash to prevent names being interpreted as comments
+        (for-each (cut format port "/~a~%" <>) names)
+        (unless (zero? (status:exit-val (close-pipe port)))
+          (error "`rclone copy' returned non-zero")))))
 
-(define silent-copy rclone-copy-file)
+;;; -> mtimes
+(define (do-copies tab names src dest)
+  (for-each
+   (lambda (n)
+     (format #t "copy~{ ~s~}~%"
+             (map (cut path-join <> n)
+                  (list src dest))))
+   names)
+  (copy-files src dest names)
+  (map (lambda (n)
+         (cons n (assoc-ref tab n)))
+       names))
 
-(define (merge a-orig b-orig)
-  (when (*verbose*)
-    (format #t "merge ~s ~s... " a-orig b-orig))
-  (let ((a (tmpnam))
-        (b (tmpnam))
-        (o (tmpnam)))
-    (silent-copy a-orig a)
-    (silent-copy b-orig b)
-    (let* ((real-merge-cmd
-            (expand-merge-cmd (*merge-command*) a b o))
+(define (merge mergedir paths name)
+  (let* ((name-hash (hash name #x10000))
+         (name-base (basename name))
+         (merge-filenames
+          (map (lambda (letter)
+                 (format #f "~4,'0x-~a-~a"
+                         name-hash
+                         letter
+                         name-base))
+               '(#\a #\b #\o)))
+         (input-filenames
+          (take merge-filenames 2)))
+    (when (*verbose?*)
+      (format #t "merge~{ ~s~}..." input-filenames))
+    (for-each
+     (cut copy-one-file <> <>)
+     (map (cut path-join <> name) paths)
+     (map (cut path-join mergedir <>) input-filenames))
+    (let* ((full-merge-filenames
+            (map (cut path-join mergedir <>)
+                 merge-filenames))
+           (output-filename
+            (list-ref full-merge-filenames 2))
+           (real-merge-cmd
+            (apply expand-merge-cmd (cdr (*merge-command*))
+                   full-merge-filenames))
            (st (and (and=>
                      (status:exit-val
                       (system real-merge-cmd)) zero?)
-                    (access? o R_OK))))
-      (delete-file a)
-      (delete-file b)
+                    (access? output-filename R_OK))))
+      (for-each delete-file (take full-merge-filenames 2))
       (if st
           (begin
-            (when (*verbose*)
+            (when (*verbose?*)
               (display "done")
               (newline))
-            o)
+            output-filename)
           (begin
             (false-if-exception
-             (delete-file o))
-            (when (*verbose*)
+             (delete-file output-filename))
+            (when (*verbose?*)
               (display "cancelled")
               (newline))
             #f)))))
 
+;;; -> mtimes
+(define (handle-merge mergedir saved-tab paths name)
+  (let ((out-fname
+         (false-if-exception
+          (merge mergedir paths name))))
+    (if out-fname
+        (begin
+          (for-each
+           (cut copy-one-file out-fname <>)
+           (map (cut path-join <> name) paths))
+          (let ((mtime (stat:mtime (stat out-fname))))
+            (delete-file out-fname)
+            mtime))
+        (assoc-ref saved-tab name))))
 
-;;; if direction not #f, sync and record time
-;;; else, copy both as tmp files and run merge
-;;; if merge successful, save this one to both places
-;;; else, skip this file
-(define (process-file saved-tab a-tab b-tab a-place b-place fname)
-  (let ((s (assoc-ref saved-tab fname))
-        (a (assoc-ref a-tab fname))
-        (b (assoc-ref b-tab fname))
-        (af (path-join a-place fname))
-        (bf (path-join b-place fname)))
-    (case (sync-direction s a b)
-      ((a->b)
-       (copy af bf)
-       a)
-      ((b->a)
-       (copy bf af)
-       b)
-      ((both)
-       (let ((out-fname (merge af bf)))
-         (if out-fname
-             (begin
-               (silent-copy out-fname af)
-               (silent-copy out-fname bf)
-               (let ((mtime (stat:mtime (stat out-fname))))
-                 (delete-file out-fname)
-                 mtime))
-             s)))
-      (else s))))
+(define (get-actions a-tab b-tab saved-tab names)
+  (map
+   (lambda (n)
+     (let ((s (assoc-ref saved-tab n))
+           (a (assoc-ref a-tab n))
+           (b (assoc-ref b-tab n)))
+       (cons n (sync-direction s a b))))
+   names))
+
+(define (split-actions actions)
+  (define (join-to-key x k l)
+    (map
+     (lambda (ll)
+       (let-values (((key items) (car+cdr ll)))
+         (if (eq? k key)
+             (cons* key x items)
+             ll)))
+     l))
+  (fold
+   (lambda (a s)
+     (join-to-key (car a) (cdr a) s))
+   '((#f) (a->b) (b->a) (both))              ; (make-list 3 '())
+   actions))
+
+(define (delete-dir dir)
+  (let more ((ds (opendir dir)))
+    (let ((e (readdir ds)))
+      (unless (eof-object? e)
+        (if (member e '("." ".."))
+            (more ds)
+            (let ((fn (path-join dir e)))
+              ((if (eq? (stat:type (stat fn)) 'directory)
+                   delete-dir
+                   delete-file)
+               fn)))))))
+
+(define (run-actions action names paths a-tab b-tab saved-tab)
+  (case action
+    ((#f)
+     (map (lambda (n)
+            (cons n (or (assoc-ref saved-tab n)
+                        (assoc-ref a-tab n)
+                        ;; third should never be reached
+                        (assoc-ref b-tab n))))
+          names))
+    ((a->b)
+     (apply do-copies a-tab names paths))
+    ((b->a)
+     (apply do-copies b-tab names (reverse paths)))
+    ((both)
+     (let ((mergedir
+            (path-join "/tmp" (format #f "syncdir-merge-~a" (getpid)))))
+       (mkdir mergedir)
+       (let ((mtimes
+              (filter-map
+               (lambda (n)
+                 (cons n
+                       (handle-merge
+                        mergedir
+                        saved-tab
+                        paths
+                        n)))
+               names)))
+         (delete-dir mergedir)
+         mtimes)))))
 
 (define (die fmt . args)
   (format (current-error-port)
@@ -546,6 +651,25 @@
           +program-name+
           fmt args)
   (exit 1))
+
+(define (dummy-display actions paths)
+  (for-each
+   (lambda (action)
+     (let-values (((n a) (car+cdr action)))
+       (when a
+         (format #t "(dummy) ~a~{ ~s~}~%"
+                 (if (eq? a 'both) 'merge 'copy)
+                 ((if (eq? a 'b->a) reverse identity)
+                  (map (cut path-join <> n) paths))))))
+   actions))
+
+(define (make-new-tab actions paths a-tab b-tab saved-tab)
+  (concatenate
+   (map
+    (lambda (x)
+      (run-actions (car x) (cdr x)
+                   paths a-tab b-tab saved-tab))
+    (split-actions actions))))
 
 (define (run-sync . paths)
   (let-values (((local remote) (partition path-local? paths)))
@@ -557,27 +681,24 @@
                   (expand-user-dir (car local)))))
                (a local-path)
                (b (car remote))
+               (ab (list a b))
                (at (local-file-times a))
                (bt (rclone-file-times b))
                (st (read-saved-times local-path))
-               (new-saved-tab
-                (let loop ((new-tab '())
-                           (files (all-files at bt)))
-                  (if (null? files) new-tab
-                      (let* ((f (car files))
-                             (new-times
-                              (process-file
-                               st at bt a b f)))
-                        (loop (acons f new-times new-tab)
-                              (cdr files)))))))
-          (write-saved-times new-saved-tab local-path)))))
+               (actions
+                (get-actions at bt st (all-files at bt))))
+          (if (*dummy?*)
+              (dummy-display actions ab)
+              (write-saved-times
+               (make-new-tab
+                actions ab at bt st)
+               local-path))))))
 
 (define (main argv)
   (let ((len (length argv))
         (config (read-config)))
     (parameterize
-        ((*config-alist* config)
-         (*verbose* #t)                 ; keep old behavior
+        ((*verbose?* #t)                 ; keep old behavior
          (*ignore-globs*
           (or (assq-ref config 'ignore-globs) '()))
          (*merge-command*
@@ -586,14 +707,15 @@
                 ((not (string-null? e))))
                (cons 'env (string->cmd-template e)))
               (and=>
-               (assq-ref (*config-alist*) 'merge-cmd)
+               (assq-ref config 'merge-cmd)
                (cut cons 'config <>))
               (cons
                'editor
                (editor->merge-cmd
                 (or (getenv "EDITOR")
                     (getenv "VISUAL")
-                    +default-editor+))))))
+                    (+default-editor+))))))
+         (*dummy?* (and=> (getenv "SYNCDIR_DUMMY") (const #t))))
       (cond
        ((= len 3)
         (apply run-sync (cdr argv)))
