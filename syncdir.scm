@@ -136,6 +136,11 @@
 (define (unix-time~=? a b)
   (<= (abs (- a b)) +unix-time-comparison-thresh+))
 
+(define (getenv-non-null? e)
+  (and-let* ((v (getenv e))
+             ((not (string-null? v))))
+            v))
+
 
 ;;; Paths
 
@@ -182,173 +187,27 @@
         (if dir (string-append dir suffix) path))))
 
 
-;;; Shell command escaping
+;;; Commands
 
-(define (default-escaping template)
-  (cond
-   ((list? template) +default-shell-escaping-rule-list+)
-   ((string? template) +default-shell-escaping-rule-string+)
-   (else #f)))
-
-(define (string-escape s escape-char-set special)
-  (string-fold
-   (lambda (c s)
-     (string-append s (cond
-                       ((char-set-contains? escape-char-set c)
-                        (string #\\ c))
-                       ((assq c special) => cdr)
-                       ((or (char-set-contains? char-set:graphic c)
-                            (char-set-contains? char-set:blank c))
-                        (string c))
-                       (else
-                        (format #f "\\x~x" (char->integer c))))))
-   "" s))
-
-(define (resolve-escaping-rules r)
-  (define (symbol->escaping sym)
-    (or (assq-ref +shell-escaping-rules+ sym)
-        (error "Unknown escaping rule" sym)))
-  (define (*->char-set x)
-    (cond
-     ((char-set? x) x)
-     ((string? x) (string->char-set x))
-     ((list? x) (list->char-set x))
-     (else
-      (error
-       "Escaped charset must be string, list or charset, not" x))))
-  (define (*->escaping x)
-    (cond
-     ((or (not x) (null? x))
-      (cons char-set:empty '()))
-     ((symbol? x)
-      (resolve-escaping-rules
-       (symbol->escaping x)))
-     ((list? x)
-      (cons (*->char-set (car x)) (cdr x)))
-     (else
-      (error
-       "Bad escaping rule" x))))
-  (let*-values
-      (((base this)
-        (if (and (pair? r)
-                 (symbol? (car r)))
-            (values (resolve-escaping-rules
-                     (symbol->escaping (car r)))
-                    (resolve-escaping-rules
-                     (cdr r)))
-            (values #f (*->escaping r)))))
-    (if base
-        (let ((sp (append (cdr base) (cdr this))))
-          (cons (char-set-difference
-                 (char-set-union (car base) (car this))
-                 (list->char-set (map car sp)))
-                sp))
-        this)))
-
-(define (string-escape-for-rules s r)
-  (call-with-values
-      (lambda ()
-        (car+cdr (resolve-escaping-rules r)))
-    (cut string-escape s <> <>)))
-
-
-;;; Command templates
-
-(define (string->cmd-template s)
-  (let ((t (if (or (string-null? s)
-                   (not (char=? (string-ref s 0) #\()))
-               s
-               (call-with-input-string s read))))
-    (cons (default-escaping t) t)))
-
-(define (expand-cmd-list escaping template replace-alist)
-  (string-join
-   (map (lambda (x)
-          (if (string? x)
-              x
-              (string-escape-for-rules
-               (assq-ref replace-alist x)
-               escaping)))
-        template)
-   " "))
-
-(define (expand-cmd-string escaping template replace-alist)
-  (define (expand buf)
-    (string-escape-for-rules
-     (or (assq-ref replace-alist (list->symbol (reverse buf)))
-         (error "Invalid substitution in command" template))
-     escaping))
-  (define (identifier-char? c)
-    (char-set-contains? +cmd-var-char-set+ c))
-  (define (process-char-nobuf res c)
-    (if (char=? c #\$)
-        (list res '() #f)
-        (list (string-append/shared res (string c))
-              #f #f)))
-  (call-with-values
-      (lambda ()
-        (apply
-         values
-         (string-fold
-          (lambda (c s)
-            (let-values (((res buf braced?) (apply values s)))
-              (cond
-               ((not buf)
-                (process-char-nobuf res c))
-               ((and braced? (char=? c #\}))
-                (list (string-append res (expand buf)) #f #f))
-               ((and (null? buf) (not braced?) (char=? c #\{))
-                (list res '() #t))
-               ((and (not braced?) (not (identifier-char? c)))
-                (process-char-nobuf (string-append res (expand buf)) c))
-               (else
-                (list res (cons c buf) braced?)))))
-          '("" #f #f)
-          template)))
-    (lambda (res buf braced?)
-      (if (and buf braced?)
-          (error "Incomplete substitution in command" template))
-      (if buf
-          (string-append res (expand buf))
-          res))))
-
-(define (string-1-list->string-maybe t)
-  (if (and (pair? t)
-           (string? (car t))
-           (null? (cdr t)))
-      (car t)
-      t))
-
-(define (escaping-and-template cmd)
-  (let-values (((e t)
-                (if (or (string? cmd)
-                        (and (pair? cmd)
-                             (string? (car cmd))))
-                    (values 'default cmd)
-                    (car+cdr cmd))))
-    (values e (string-1-list->string-maybe t))))
-
-(define (expand-cmd cmd replace-alist)
-  (let-values (((escaping template) (escaping-and-template cmd)))
-    ((cond
-      ((list? template) expand-cmd-list)
-      ((string? template) expand-cmd-string)
-      (else
-       (error "Expected command to be a string or list, got" template)))
-     (if (eq? escaping 'default)
-         (default-escaping template)
-         escaping)
-     template
-     replace-alist)))
+(define (substitute-list l s)
+  (map (lambda (x)
+         (if (symbol? x) (assq x s) x))
+       l))
 
 (define (expand-merge-cmd merge-cmd a b o)
-  (expand-cmd merge-cmd
-              `((a . ,a)
-                (b . ,b)
-                (output . ,o))))
+  (substitute-list merge-cmd
+                   `((a . ,a)
+                     (b . ,b)
+                     (output . ,o))))
 
-(define (editor->merge-cmd editor)
-  (list editor 'a 'b 'output))
+(define (string-split-no-empty s pred)
+  (filter (negate string-null?) (string-split s pred)))
+
+(define (string->merge-cmd s)
+  `(,@(string-split-no-empty s char-set:blank) 'a 'b 'output))
+
+(define (open-output-pipe* name . args)
+  (apply open-pipe* OPEN_WRITE name args))
 
 
 ;;; Config file
@@ -416,8 +275,16 @@
       (error "`rclone lsf' returned non-zero"))
     times))
 
-(define (rclone-copy-file src-rclone-path dest-rclone-path)
-  (system* "rclone" "copyto" src-rclone-path dest-rclone-path))
+(define (rclone-copy-file src dest)
+  (system* "rclone" "copyto" src dest))
+
+(define (rclone-copy-file-list src dest names)
+  (let ((port (open-output-pipe*
+               "rclone" "copy" "--files-from" "/dev/stdin" src dest)))
+    ;; prepend slash to prevent names being interpreted as comments
+    (for-each (cut format port "/~a~%" <>) names)
+    (unless (zero? (status:exit-val (close-pipe port)))
+      (error "`rclone copy' returned non-zero"))))
 
 
 ;;; Local files
@@ -495,16 +362,7 @@
                   (copy-file (path-join src n)
                              (path-join dest n)))
                 names)
-      (let ((port (open-output-pipe
-                   (expand-cmd-list
-                    'bourne-shell
-                    '("rclone copy --files-from /dev/stdin" src dest)
-                    `((src . ,src)
-                      (dest . ,dest))))))
-        ;; prepend slash to prevent names being interpreted as comments
-        (for-each (cut format port "/~a~%" <>) names)
-        (unless (zero? (status:exit-val (close-pipe port)))
-          (error "`rclone copy' returned non-zero")))))
+      (rclone-copy-file-list src dest names)))
 
 ;;; -> mtimes
 (define (do-copies tab names src dest)
@@ -514,7 +372,8 @@
              (map (cut path-join <> n)
                   (list src dest))))
    names)
-  (copy-files src dest names)
+  (unless (null? names)
+    (copy-files src dest names))
   (map (lambda (n)
          (cons n (assoc-ref tab n)))
        names))
@@ -547,7 +406,7 @@
                    full-merge-filenames))
            (st (and (and=>
                      (status:exit-val
-                      (system real-merge-cmd)) zero?)
+                      (apply system* real-merge-cmd)) zero?)
                     (access? output-filename R_OK))))
       (for-each delete-file (take full-merge-filenames 2))
       (if st
@@ -702,18 +561,17 @@
          (*ignore-globs*
           (or (assq-ref config 'ignore-globs) '()))
          (*merge-command*
-          (or (and-let*
-               ((e (getenv "SYNCDIR_MERGE"))
-                ((not (string-null? e))))
-               (cons 'env (string->cmd-template e)))
+          (or (and=> (getenv-non-null? "SYNCDIR_MERGE")
+                     (lambda (x)
+                       (cons 'env (string->merge-cmd x))))
               (and=>
                (assq-ref config 'merge-cmd)
                (cut cons 'config <>))
               (cons
                'editor
-               (editor->merge-cmd
-                (or (getenv "EDITOR")
-                    (getenv "VISUAL")
+               (string->merge-cmd
+                (or (getenv-non-null? "EDITOR")
+                    (getenv-non-null? "VISUAL")
                     (+default-editor+))))))
          (*dummy?* (and=> (getenv "SYNCDIR_DUMMY") (const #t))))
       (cond
