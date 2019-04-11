@@ -166,7 +166,7 @@
   (zero? (status:exit-val es)))
 
 
-;;; Error handling
+;;;; Error handling
 
 (define (throw* key msg . fmt)
   (throw key #f msg fmt #f))
@@ -199,17 +199,7 @@
                      (current-error-port) k args)
               error-expr)
             (lambda (k . args)
-              (set! stack (make-stack #t 2)))))
-
-       ;; #'(catch
-       ;;    #t
-       ;;    (lambda ()
-       ;;      expr)
-       ;;    (lambda (k . args)
-       ;;      (apply display-exception
-       ;;             (current-error-port) k args)
-       ;;      error-expr))
-       ))))
+              (set! stack (make-stack #t 2)))))))))
 
 ;;; not used yet
 (define-syntax catch-case
@@ -227,7 +217,7 @@
                         spec spec* ...)))))))))
 
 
-;;; Paths
+;;;; Paths
 
 (define (path-join x . l)
   (string-join (map (cut string-trim-right <> file-name-separator?)
@@ -272,7 +262,7 @@
         (if dir (string-append dir suffix) path))))
 
 
-;;; Commands
+;;;; Commands
 
 (define (substitute-list l s)
   (map (lambda (x)
@@ -295,7 +285,7 @@
   (apply open-pipe* OPEN_WRITE name args))
 
 
-;;; Config file
+;;;; Config file
 
 (define (config-path)
   (string-append
@@ -316,7 +306,7 @@
       '()))
 
 
-;;; Saved times file
+;;;; Saved times file
 
 (define (saved-times-file-name local-path)
   (path-join local-path +saved-times-file-basename+))
@@ -334,13 +324,13 @@
     (cut format <> "~s~%" times)))
 
 
-;;; Modification times
+;;;; Modification times
 
 (define (parse-mtime datetime-string)        ; -> <number>, unix time
   (car (mktime (car (strptime "%Y-%m-%d %H:%M:%S" datetime-string)))))
 
 
-;;; rclone
+;;;; rclone
 
 (define (rclone-error subcommand)
   (throw 'rclone #f
@@ -378,7 +368,7 @@
       (rclone-error "copy"))))
 
 
-;;; Local files
+;;;; Local files
 
 (define local-mtime
   (compose stat:mtime stat))
@@ -408,7 +398,7 @@
    (local-file-list local-path)))
 
 
-;;; Rules
+;;;; Rules
 
 ;;; -> a->b | b->a | both | #f
 (define (sync-direction saved-time a-time b-time)
@@ -436,7 +426,7 @@
                        (map car b-tab)))))
 
 
-;;; Operations
+;;;; Operations
 
 (define* (copy-one-file src dest #:optional (name #f))
   (define (make-filename dir-or-path)
@@ -481,7 +471,7 @@
                '(#\a #\b #\o)))
          (input-filenames
           (take merge-filenames 2)))
-    (when (verbose? 'normal)
+    (when (verbose? 'quiet)
       (format #t "merge~{ ~s~}..." input-filenames))
     (for-each
      (cut copy-one-file <> <>)
@@ -501,14 +491,14 @@
       (for-each delete-file (take full-merge-filenames 2))
       (if st
           (begin
-            (when (verbose? 'normal)
+            (when (verbose? 'quiet)
               (display "done")
               (newline))
             output-filename)
           (begin
             (false-if-exception
              (delete-file output-filename))
-            (when (verbose? 'normal)
+            (when (verbose? 'quiet)
               (display "cancelled")
               (newline))
             #f)))))
@@ -659,16 +649,27 @@
               "named path ~A not found" entry)))
 
 
-;;; Command line
+;;;; Command line
 
 (define (display-usage)
   (format #t "usage: ~a [OPTIONS | NAMES]...~%"
           +program-name+))
 
+;;; Guile issues a warning here, but it shouldn’t
 (define (display-help-message)
   (format #t "Usage: ~a [OPTION | NAME]...~%~
-              Synchronize and merge directories with remotes.~%"
-          +program-name+)
+              Synchronize and merge directories with remotes.~%~%~
+              NAMEs are named path pair names, which are defined in~%~
+              the config file.~%~%~
+              ~:{~t -~a~{, --~a~} ~30t~a~%~}~%"
+          +program-name+
+          '((#\h ("help") "Display this message and exit")
+            (#\v ("verbose") "Display exception backtraces")
+            (#\q ("quiet") "Don't announce copies")
+            (#\Q ("silent" "very-quiet")
+             "Don't print anything to stdout")
+            (#\n ("dummy" "dry-run")
+             "Dummy mode: don't actually copy or merge anything")))
   (exit))
 
 (define (parse-cmdline argv)
@@ -718,7 +719,7 @@
     initial-seed)))
 
 
-;;; Main
+;;;; Main
 
 (define (config-global-options defaults config)
   (apply

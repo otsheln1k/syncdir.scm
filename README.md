@@ -12,10 +12,9 @@ saved time stamp, `syncdir.scm` will run a merge command.
 There is a config file `$XDG_CONFIG_PATH/syncdir.scm` (if
 `$XDG_CONFIG_PATH` isn't set, it defaults to "~/.config"). It's an
 association list. The following keys are meaningful:
-- `paths`: an association list of named paths. Running `syncdir.scm`
-  with a single argument syncs the respective pair of paths. For
-  example, an entry might look like this: `(foo "/path/to/local/foo"
-  "remote:foo")`.
+- `paths`: an association list of named paths. For example, an entry
+  might look like this: `(foo "/path/to/local/foo" "remote:foo")`.
+  Currently, it's only possible to synchronize named path pairs.
 - `ignore-globs`: a list of [globs](#glob-syntax) with which to match
   filenames. All files whose name matches at least one of this globs
   is skipped by `syncdir.scm`. Example: `("*~" "*.tmp" ".*.sw?")`.
@@ -79,5 +78,19 @@ There is a dummy mode in which files aren't copied and merges aren't
 run. It can be used to quickly check what's going to be synchronized.
 Currently the only way to enable dummy mode is to specify an
 environment variable `SYNCDIR_DUMMY`.
+
+## Command line
+
+The following command line options are available:
+- `-h`: display a help message.
+- `-v`, `-q`, `-Q`: verbose, quiet and silent modes respectively. In
+  silent mode, no messages are output to stdout (exceptions are still
+  displayed to stderr). In quiet mode, only merge messages are
+  displayed (they announce which files are going to be merged). In
+  normal mode (default), copies are also announced. In verbose mode,
+  exception backtraces are also displayed.
+- `-n`: [dummy mode](#dummy-mode).
+
+These options also have long names; run `syncdir.scm -h` to view them.
 
 [rclone]: https://rclone.org/
