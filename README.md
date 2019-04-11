@@ -12,10 +12,10 @@ saved time stamp, `syncdir.scm` will run a merge command.
 There is a config file `$XDG_CONFIG_PATH/syncdir.scm` (if
 `$XDG_CONFIG_PATH` isn't set, it defaults to "~/.config"). It's an
 association list. The following keys are meaningful:
-- `paths`: an association list of preconfigured paths. Running
-  `syncdir.scm` with a single argument syncs the respective pair of
-  paths. For example, an entry might look like this: `(foo
-  "/path/to/local/foo" "remote:foo")`.
+- `paths`: an association list of named paths. Running `syncdir.scm`
+  with a single argument syncs the respective pair of paths. For
+  example, an entry might look like this: `(foo "/path/to/local/foo"
+  "remote:foo")`.
 - `ignore-globs`: a list of [globs](#glob-syntax) with which to match
   filenames. All files whose name matches at least one of this globs
   is skipped by `syncdir.scm`. Example: `("*~" "*.tmp" ".*.sw?")`.

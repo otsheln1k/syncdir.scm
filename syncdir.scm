@@ -7,6 +7,7 @@
              (srfi srfi-2)
              (srfi srfi-11)
              (srfi srfi-26)
+             (srfi srfi-37)
              (ice-9 popen)
              (ice-9 textual-ports)
              (ice-9 pretty-print)
@@ -42,9 +43,22 @@
 
 
 (define *ignore-globs* (make-parameter '()))
-(define *verbose?* (make-parameter #f))
+(define *verbosity* (make-parameter #f))
 (define *merge-command* (make-parameter #f))
 (define *dummy?* (make-parameter #f))
+
+
+;;; note: this one returns #f if ‘cond’ as false and ‘else’ clause is
+;;; missing
+(define-syntax aif
+  (lambda (x)
+    (syntax-case x ()
+      ((_ cond then rest ...)
+       (let ((it (datum->syntax x 'it)))
+         #`(let ((#,it cond))
+             #,(syntax-case #'(then rest ...) ()
+                 ((then) #`(and #,it then))
+                 ((then else) #`(if #,it then else)))))))))
 
 
 (define (glob-match glob s)
@@ -60,9 +74,8 @@
            (case (string-ref g 0)
              ((#\\) (and (>= (string-length g) 2)
                          (skip-more (string-drop g 2))))
-             ((#\[) (and=> (string-index g #\] 2)
-                           (lambda (end-idx)
-                             (skip-more (string-drop g (1+ end-idx))))))
+             ((#\[) (aif (string-index g #\] 2)
+                         (skip-more (string-drop g (1+ it)))))
              (else => (lambda (this-ch)
                         (let ((drop-this (string-drop g 1)))
                           (cond
@@ -112,34 +125,106 @@
         ((#\*) (or (glob-match (string-drop glob 1) s)
                    (and (not (string-null? s))
                         (glob-match glob (string-drop s 1)))))
-        ((#\[) (and=> (string-index glob #\] 2)
-                      (lambda (end-idx)
-                        (not (string-null? s))
-                        (char-set-contains?
-                         (bracket-expression->char-set
-                          (string-take glob (1+ end-idx)))
-                         (string-ref s 0))
-                        (glob-match (string-drop glob (1+ end-idx))
-                                    (string-drop s 1)))))
+        ((#\[) (aif (string-index glob #\] 2)
+                    (and (not (string-null? s))
+                         (char-set-contains?
+                          (bracket-expression->char-set
+                           (string-take glob (1+ it)))
+                          (string-ref s 0))
+                         (glob-match (string-drop glob (1+ it))
+                                     (string-drop s 1)))))
         ((#\\) (and (>= (string-length glob) 2)
                     (match-char (string-ref glob 1) 2)))
         ((#\, #\}) s)
         ((#\{)
          (let next-branch ((g (string-drop glob 1)))
-           (or (and=> (glob-match g s)
-                      (lambda (s)
-                        (and (string? s)
-                             (glob-match (skip-to #\}) s))))
+           (or (aif (glob-match g s)
+                    (and (string? it)
+                         (glob-match (skip-to #\}) it)))
                (and=> (skip-to #\, g) next-branch))))
         (else => (cut match-char <> 1)))))
 
 (define (unix-time~=? a b)
   (<= (abs (- a b)) +unix-time-comparison-thresh+))
 
-(define (getenv-non-null? e)
+(define (getenv-non-null e)
   (and-let* ((v (getenv e))
              ((not (string-null? v))))
             v))
+
+(define (verbose? x)
+  (if (number? x)
+      (>= (*verbosity*) x)
+      (verbose? (assq-ref
+                 '((verbose . 1)
+                   (normal . 0)
+                   (quiet . -1)
+                   (silent . -2))
+                 x))))
+
+(define (exit-status-ok? es)
+  (zero? (status:exit-val es)))
+
+
+;;; Error handling
+
+(define (throw* key msg . fmt)
+  (throw key #f msg fmt #f))
+
+(define (display-exception port key . args)
+  (format port "Throw to key `~a'" key)
+  (aif (false-if-exception
+        (call-with-output-string
+         (lambda (s)
+           (apply display-error #f s args))))
+       (format port ":~%~a" it)
+       (format port " with args `~s'~%" args)))
+
+(define-syntax catch-exceptions
+  (lambda (x)
+    (syntax-case x ()
+      ((_ expr error-expr)
+
+       #'(let ((stack #f))
+           (catch
+            #t
+            (lambda ()
+              expr)
+            (lambda (k . args)
+              (when (verbose? 'verbose)
+                (display-backtrace
+                 stack
+                 (current-error-port)))
+              (apply display-exception
+                     (current-error-port) k args)
+              error-expr)
+            (lambda (k . args)
+              (set! stack (make-stack #t 2)))))
+
+       ;; #'(catch
+       ;;    #t
+       ;;    (lambda ()
+       ;;      expr)
+       ;;    (lambda (k . args)
+       ;;      (apply display-exception
+       ;;             (current-error-port) k args)
+       ;;      error-expr))
+       ))))
+
+;;; not used yet
+(define-syntax catch-case
+  (lambda (x)
+    (syntax-case x ()
+      ((_ expr spec spec* ...)
+       (let ((key (datum->syntax x 'key))
+             (args (datum->syntax x 'args)))
+         #`(catch #t
+                  (lambda () expr)
+                  (lambda (key . args)
+                    (let ((#,key key)
+                          (#,args args))
+                      (case key
+                        spec spec* ...)))))))))
 
 
 ;;; Paths
@@ -257,6 +342,11 @@
 
 ;;; rclone
 
+(define (rclone-error subcommand)
+  (throw 'rclone #f
+         "`rclone ~A' returned non-zero" (list subcommand)
+         #f))
+
 (define (rclone-file-times rclone-path)
   (let* ((pp
           (open-pipe*
@@ -271,20 +361,21 @@
                          (t (parse-mtime (string-take l idx))))
                     (loop
                      (acons (string-drop l (1+ idx)) t lst))))))))
-    (unless (zero? (status:exit-val (close-pipe pp)))
-      (error "`rclone lsf' returned non-zero"))
+    (unless (exit-status-ok? (close-pipe pp))
+      (rclone-error "lsf"))
     times))
 
 (define (rclone-copy-file src dest)
-  (system* "rclone" "copyto" src dest))
+  (unless (exit-status-ok? (system* "rclone" "copyto" src dest))
+    (rclone-error "copyto")))
 
 (define (rclone-copy-file-list src dest names)
   (let ((port (open-output-pipe*
                "rclone" "copy" "--files-from" "/dev/stdin" src dest)))
     ;; prepend slash to prevent names being interpreted as comments
     (for-each (cut format port "/~a~%" <>) names)
-    (unless (zero? (status:exit-val (close-pipe port)))
-      (error "`rclone copy' returned non-zero"))))
+    (unless (exit-status-ok? (close-pipe port))
+      (rclone-error "copy"))))
 
 
 ;;; Local files
@@ -308,12 +399,12 @@
 (define (local-file-times local-path)
   (filter-map
    (lambda (fn)
-     (and=> (false-if-exception (local-mtime fn))
-            (cut cons
-                 (string-trim-both
-                  (string-drop fn (string-length local-path))
-                  file-name-separator?)
-                 <>)))
+     (aif (false-if-exception (local-mtime fn))
+          (cons
+           (string-trim-both
+            (string-drop fn (string-length local-path))
+            file-name-separator?)
+           it)))
    (local-file-list local-path)))
 
 
@@ -390,7 +481,7 @@
                '(#\a #\b #\o)))
          (input-filenames
           (take merge-filenames 2)))
-    (when (*verbose?*)
+    (when (verbose? 'normal)
       (format #t "merge~{ ~s~}..." input-filenames))
     (for-each
      (cut copy-one-file <> <>)
@@ -404,21 +495,20 @@
            (real-merge-cmd
             (apply expand-merge-cmd (cdr (*merge-command*))
                    full-merge-filenames))
-           (st (and (and=>
-                     (status:exit-val
-                      (apply system* real-merge-cmd)) zero?)
+           (st (and (exit-status-ok?
+                     (apply system* real-merge-cmd))
                     (access? output-filename R_OK))))
       (for-each delete-file (take full-merge-filenames 2))
       (if st
           (begin
-            (when (*verbose?*)
+            (when (verbose? 'normal)
               (display "done")
               (newline))
             output-filename)
           (begin
             (false-if-exception
              (delete-file output-filename))
-            (when (*verbose?*)
+            (when (verbose? 'normal)
               (display "cancelled")
               (newline))
             #f)))))
@@ -504,13 +594,6 @@
          (delete-dir mergedir)
          mtimes)))))
 
-(define (die fmt . args)
-  (format (current-error-port)
-          "~a: ~k~%"
-          +program-name+
-          fmt args)
-  (exit 1))
-
 (define (dummy-display actions paths)
   (for-each
    (lambda (action)
@@ -533,7 +616,9 @@
 (define (run-sync . paths)
   (let-values (((local remote) (partition path-local? paths)))
     (if (or (null? local) (null? remote))
-        (die "error: there must be one local and one remote path")
+        (apply throw* 'bad-paths
+               "expected one local and one remote path; got ~A and ~A"
+               paths)
         (let* ((local-path
                 (relative-path
                  (realpath
@@ -553,49 +638,134 @@
                 actions ab at bt st)
                local-path))))))
 
-(define (main argv)
-  (let ((len (length argv))
-        (config (read-config)))
+(define (run-path-entry entry)
+  (let ((cfg (cdddr entry)))
     (parameterize
-        ((*verbose?* #t)                 ; keep old behavior
-         (*ignore-globs*
-          (or (assq-ref config 'ignore-globs) '()))
+        ((*ignore-globs*
+          (append (*ignore-globs*)
+                  (or (assq-ref cfg 'ignore-globs) '())))
          (*merge-command*
-          (or (and=> (getenv-non-null? "SYNCDIR_MERGE")
-                     (lambda (x)
-                       (cons 'env (string->merge-cmd x))))
-              (and=>
-               (assq-ref config 'merge-cmd)
-               (cut cons 'config <>))
-              (cons
-               'editor
-               (string->merge-cmd
-                (or (getenv-non-null? "EDITOR")
-                    (getenv-non-null? "VISUAL")
-                    (+default-editor+))))))
-         (*dummy?* (and=> (getenv "SYNCDIR_DUMMY") (const #t))))
-      (cond
-       ((= len 3)
-        (apply run-sync (cdr argv)))
-       ((= len 2)
-        (let* ((path-id (string->symbol (second argv)))
-               (paths (assq-ref config 'paths))
-               (entry (or (and=> paths (cut assq path-id <>))
-                          (die "error: preconfigured path ~a not found"
-                               path-id)))
-               (cfg (cdddr entry)))
+          (let ((old (*merge-command*)))
+            (cond
+             ((eq? (car old) 'env) old)
+             ((assq-ref cfg 'merge-cmd)
+              => (cut cons 'override <>))
+             (else old)))))
+      (apply run-sync (take (cdr entry) 2)))))
+
+(define (run-entry entry paths)
+  (or (and=> (assq entry paths) run-path-entry)
+      (throw* 'bad-paths
+              "named path ~A not found" entry)))
+
+
+;;; Command line
+
+(define (display-usage)
+  (format #t "usage: ~a [OPTIONS | NAMES]...~%"
+          +program-name+))
+
+(define (display-help-message)
+  (format #t "Usage: ~a [OPTION | NAME]...~%~
+              Synchronize and merge directories with remotes.~%"
+          +program-name+)
+  (exit))
+
+(define (parse-cmdline argv)
+  (define (paths-error)
+    (throw* 'bad-cmdline
+            "expecting 2 arguments after `-p'/`--paths' option"))
+  (define initial-seed
+    '(()  #| entries |#
+      0   #| verbosity |#
+      #f  #| dummy mode |#
+      ;; TODO:
+      ;; #f  #| disable-default-config|#
+      ;; '() #| additional-config-files |#
+      ))
+
+  (define (mutate-state-proc which how)
+    (lambda (opt name arg seed)
+      (let*-values (((hd tl*) (split-at seed which))
+                    ((elt tl) (car+cdr tl*)))
+        (append hd (list (how arg elt)) tl))))
+  (define arg (lambda (arg opt) arg))
+  (define (op proc . args)
+    (lambda (opt name arg seed)
+      (apply proc args) seed))
+  (define (named-path name seed)
+    (cons (cons (string->symbol name)
+                (car seed))
+          (cdr seed)))
+  (define (bad-option-maybe opt name arg seed)
+    (throw* 'bad-cmdline "unrecognized option: ~S" name))
+  (apply
+   values
+   (args-fold
+    (cdr argv)
+    (list (option '(#\h "help") #f #f
+                  (op display-help-message))
+          (option '(#\v "verbose") #f #f
+                  (mutate-state-proc 1 (const 1)))
+          (option '(#\q "quiet") #f #f
+                  (mutate-state-proc 1 (const -1)))
+          (option '(#\Q "silent" "very-quiet") #f #f
+                  (mutate-state-proc 1 (const -2)))
+          (option '(#\n "dummy" "dry-run") #f #f
+                  (mutate-state-proc 2 (const #t))))
+    bad-option-maybe
+    named-path
+    initial-seed)))
+
+
+;;; Main
+
+(define (config-global-options defaults config)
+  (apply
+   values
+   (map (lambda (k)
+          (or (and=> (assq k config) cdr)
+              (assq-ref defaults k)))
+        (map car defaults))))
+
+(define (exit* v)
+  (exit (if v EXIT_SUCCESS EXIT_FAILURE)))
+
+(define (main argv)
+  (let-values (((entries verbosity dummy?)
+                (parse-cmdline argv)))
+    (parameterize
+        ((*verbosity* verbosity)
+         (*dummy?* dummy?))
+      (let ((config (read-config)))
+        (let-values (((ignore-globs merge-cmd paths)
+                      (config-global-options
+                       '((ignore-globs)
+                         (merge-cmd . #f)
+                         (paths))
+                       config)))
           (parameterize
-              ((*ignore-globs*
-                (append (*ignore-globs*)
-                        (or (assq-ref cfg 'ignore-globs) '())))
+              ((*ignore-globs* ignore-globs)
                (*merge-command*
-                (let ((old (*merge-command*)))
-                  (cond
-                   ((eq? (car old) 'env) old)
-                   ((assq-ref cfg 'merge-cmd)
-                    => (cut cons 'override <>))
-                   (else old)))))
-            (apply run-sync (take (cdr entry) 2)))))
-       (else
-        (format #t "usage:~%  ~a path-a path-b~%  ~a preconf-name~%"
-                +program-name+ +program-name+))))))
+                (or (aif (getenv-non-null "SYNCDIR_MERGE")
+                         (cons 'env (string->merge-cmd it)))
+                    (aif merge-cmd (cons 'config it))
+                    (cons
+                     'editor
+                     (string->merge-cmd
+                      (or (getenv-non-null "EDITOR")
+                          (getenv-non-null "VISUAL")
+                          (+default-editor+)))))))
+            (if (null? entries)
+                (display-usage)
+                (exit*
+                 (let process ((entries entries)
+                               (status #t))
+                   (if (null? entries)
+                       status
+                       (let-values (((entry rest) (car+cdr entries)))
+                         (catch-exceptions
+                          (begin
+                            (run-entry entry paths)
+                            (process rest status))
+                          (process rest #f)))))))))))))
