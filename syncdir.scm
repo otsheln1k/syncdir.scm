@@ -266,7 +266,7 @@
 
 (define (substitute-list l s)
   (map (lambda (x)
-         (if (symbol? x) (assq x s) x))
+         (if (symbol? x) (assq-ref s x) x))
        l))
 
 (define (expand-merge-cmd merge-cmd a b o)
@@ -506,8 +506,9 @@
 ;;; -> mtimes
 (define (handle-merge mergedir saved-tab paths name)
   (let ((out-fname
-         (false-if-exception
-          (merge mergedir paths name))))
+         (catch-exceptions
+          (merge mergedir paths name)
+          #f)))
     (if out-fname
         (begin
           (for-each
