@@ -5,7 +5,7 @@ An [rclone][rclone] wrapper for two-way synchronization.
 Syncs files in a local and remote directory, saving a time stamp for
 each file into a file `.sync-times` in the local directory. If both
 the local and the remote file have been modified relatively to the
-saved time stamp, `syncdir.scm` will run a merge command.
+saved time stamp, syncdir.scm will run a merge command.
 
 ## Config file
 
@@ -17,7 +17,8 @@ association list. The following keys are meaningful:
   Currently, it's only possible to synchronize named path pairs.
 - `ignore-globs`: a list of [globs](#glob-syntax) with which to match
   filenames. All files whose name matches at least one of this globs
-  is skipped by `syncdir.scm`. Example: `("*~" "*.tmp" ".*.sw?")`.
+  are skipped by syncdir.scm. Example:
+  `(ignore-globs "*~" "*.tmp" ".*.sw?")`.
 - `merge-cmd`: merge command in the [command syntax](#command-syntax)
   with keys `a`, `b` and `output` as the 2 files being merged and the
   output file respectively. Envioronment variable `SYNCDIR_MERGE`
