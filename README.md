@@ -20,7 +20,7 @@ association list. The following keys are meaningful:
   is skipped by `syncdir.scm`. Example: `("*~" "*.tmp" ".*.sw?")`.
 - `merge-cmd`: merge command in the [command syntax](#command-syntax)
   with keys `a`, `b` and `output` as the 2 files being merged and the
-  output file respectively. Enivoronment variable `SYNCDIR_MERGE`
+  output file respectively. Envioronment variable `SYNCDIR_MERGE`
   overrides this config option, however, it isn't read as a list --
   instead it is put into a template like this:
 ```scheme
@@ -28,7 +28,8 @@ association list. The following keys are meaningful:
 ```
   If neither is specified, value of `VISUAL` or `EDITOR` (defaulting
   to `"vi"`) is used, with the 3 file names appended (like
-  `SYNCDIR_MERGE`).
+  `SYNCDIR_MERGE`). This key can also be [overridden for specific
+  files](#glob-overrides)
 
 For example, a config file may look like this (I don't use KDiff3, but
 that's what its command line looks like according to documentation):
@@ -43,12 +44,29 @@ that's what its command line looks like according to documentation):
 Leading tilde is supported in filenames (both "~/..." and
 "~user/...").
 
-All keys can be overridden in paths (except `paths`). `ignore-globs`
-list is appended, while `merge-cmd` is replaced completely. To
-override/extend a particular key, add a pair `(key . new-value)` to
-the path list:
+## Path overrides
+
+All keys can be overridden in specific paths (except `paths` itself).
+`ignore-globs` list is appended, while `merge-cmd` is replaced
+completely. To override/extend a particular key, add a pair `(key .
+new-value)` to the path list:
 ```scheme
 (path-name "/local/path" "remote:path" (ignore-globs "more"))
+```
+
+## Glob overrides
+
+Some keys (currently only `merge-cmd`) can be overridden for a set of
+file names specified as globs. Such override specifications can be
+nested. Example:
+```scheme
+(paths
+  (foo "/local/foo" "remote:foo"
+    (merge-cmd "merge-in-foo" a b output)
+    ("*.org"
+      (merge-cmd "merge-org-files-in-foo" a b output)
+      ("project-*"
+        (merge-cmd "merge-projects-org-files-in-foo" a b output)))))
 ```
 
 ## Glob syntax

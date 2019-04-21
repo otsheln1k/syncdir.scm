@@ -44,8 +44,15 @@
 
 (define *ignore-globs* (make-parameter '()))
 (define *verbosity* (make-parameter #f))
+
 (define *merge-command* (make-parameter #f))
+(define (override-merge-cmd old new)
+  (if (or (eq? (car old) 'env) (not new))
+      old new))
+
 (define *dummy?* (make-parameter #f))
+
+(define *override-list* (make-parameter '()))
 
 
 ;;; note: this one returns #f if ‘cond’ as false and ‘else’ clause is
@@ -164,6 +171,11 @@
 
 (define (exit-status-ok? es)
   (zero? (status:exit-val es)))
+
+(define (assq-merge! a . a*)
+  (fold (lambda (kv alst)
+          (assq-set! alst (car kv) (cdr kv)))
+        a (concatenate a*)))
 
 
 ;;;; Error handling
@@ -426,6 +438,70 @@
                        (map car b-tab)))))
 
 
+;;;; Overrides and globs
+
+;;; syntax:
+;;; (with-overrides
+;;;     ((param symbol expr) ...)
+;;;   body body* ...)
+;;; expr has ‘old’ and ‘new’ bound to old and overriding
+;;; values respectively
+(define-syntax with-overrides
+  (lambda (x)
+    (syntax-case x ()
+      ((_ config
+          ((param symbol expr)
+           (param* symbol* expr*) ...)
+          body body* ...)
+       (and (every identifier? #'(param param* ...))
+            (every (compose symbol? syntax->datum)
+                   #'(symbol symbol* ...)))
+       (let* ((exprs #'(expr expr* ...))
+              (names (lambda (n)
+                       (map (cut datum->syntax <> n) exprs))))
+         (with-syntax
+          (((new new* ...)
+            (names 'new))
+           ((old old* ...)
+            (names 'old)))
+          #'(let ((config* config))
+              (parameterize
+                  ((param (let ((old (param))
+                                (new (assq-ref config* 'symbol)))
+                            expr))
+                   (param* (let ((old* (param*))
+                                 (new* (assq-ref config* 'symbol*)))
+                             expr*))
+                   ...)
+                body body* ...))))))))
+
+(define (glob-override-list config-entries name)
+  (define (glob-entry? elt)
+    (and (pair? elt)
+         (string? (car elt))))
+  (apply
+   assq-merge!
+   (filter
+    (negate glob-entry?)
+    config-entries)
+   (filter-map
+    (lambda (elt)
+      (and (glob-entry? elt)
+           (glob-match (car elt) name)
+           (glob-override-list (cdr elt) name)))
+    config-entries)))
+
+(define (call-with-prepare-overrides override-list proc)
+  ;; tmp
+  (proc))
+
+(define (call-with-merge-overrides override-list proc)
+  (with-overrides
+   override-list
+   ((*merge-command* merge-cmd (override-merge-cmd old new)))
+   (proc)))
+
+
 ;;;; Operations
 
 (define* (copy-one-file src dest #:optional (name #f))
@@ -505,28 +581,35 @@
 
 ;;; -> mtimes
 (define (handle-merge mergedir saved-tab paths name)
-  (let ((out-fname
-         (catch-exceptions
-          (merge mergedir paths name)
-          #f)))
-    (if out-fname
-        (begin
-          (for-each
-           (cut copy-one-file out-fname <>)
-           (map (cut path-join <> name) paths))
-          (let ((mtime (stat:mtime (stat out-fname))))
-            (delete-file out-fname)
-            mtime))
-        (assoc-ref saved-tab name))))
+  (call-with-merge-overrides
+   (*override-list*)
+   (lambda ()
+     (let ((out-fname
+            (catch-exceptions
+             (merge mergedir paths name)
+             #f)))
+       (if out-fname
+           (begin
+             (for-each
+              (cut copy-one-file out-fname <>)
+              (map (cut path-join <> name) paths))
+             (let ((mtime (stat:mtime (stat out-fname))))
+               (delete-file out-fname)
+               mtime))
+           (assoc-ref saved-tab name))))))
 
 (define (get-actions a-tab b-tab saved-tab names)
-  (map
-   (lambda (n)
-     (let ((s (assoc-ref saved-tab n))
-           (a (assoc-ref a-tab n))
-           (b (assoc-ref b-tab n)))
-       (cons n (sync-direction s a b))))
-   names))
+  (let ((override-list (*override-list*)))
+    (map
+     (lambda (n)
+       (let ((s (assoc-ref saved-tab n))
+             (a (assoc-ref a-tab n))
+             (b (assoc-ref b-tab n)))
+         (call-with-prepare-overrides
+          (assq-ref override-list n)
+          (lambda ()
+            (cons n (sync-direction s a b))))))
+     names)))
 
 (define (split-actions actions)
   (define (join-to-key x k l)
@@ -575,12 +658,7 @@
        (let ((mtimes
               (filter-map
                (lambda (n)
-                 (cons n
-                       (handle-merge
-                        mergedir
-                        saved-tab
-                        paths
-                        n)))
+                 (cons n (handle-merge mergedir saved-tab paths n)))
                names)))
          (delete-dir mergedir)
          mtimes)))))
@@ -604,8 +682,9 @@
                    paths a-tab b-tab saved-tab))
     (split-actions actions))))
 
-(define (run-sync . paths)
-  (let-values (((local remote) (partition path-local? paths)))
+(define (run-sync a-path b-path . rest-entry)
+  (let*-values (((paths) (list a-path b-path))
+                ((local remote) (partition path-local? paths)))
     (if (or (null? local) (null? remote))
         (apply throw* 'bad-paths
                "expected one local and one remote path; got ~A and ~A"
@@ -620,16 +699,30 @@
                (at (local-file-times a))
                (bt (rclone-file-times b))
                (st (read-saved-times local-path))
-               (actions
-                (get-actions at bt st (all-files at bt))))
-          (if (*dummy?*)
-              (dummy-display actions ab)
-              (write-saved-times
-               (make-new-tab
-                actions ab at bt st)
-               local-path))))))
+               (file-list (all-files at bt)))
+          (parameterize
+              ((*override-list*
+                (map (lambda (n)
+                       (cons n (glob-override-list rest-entry n)))
+                     file-list)))
+            (write (*override-list*)) (newline)
+            (let ((actions
+                   (get-actions at bt st file-list)))
+              (if (*dummy?*)
+                  (dummy-display actions ab)
+                  (write-saved-times
+                   (make-new-tab
+                    actions ab at bt st)
+                   local-path))))))))
 
 (define (run-path-entry entry)
+  (with-overrides
+   (cdddr entry)
+   ((*ignore-globs* ignore-globs (append old (or new '())))
+    (*merge-command* merge-cmd (override-merge-cmd old new)))
+   (apply run-sync (cdr entry))))
+
+(define (~run-path-entry entry)
   (let ((cfg (cdddr entry)))
     (parameterize
         ((*ignore-globs*
@@ -674,9 +767,6 @@
   (exit))
 
 (define (parse-cmdline argv)
-  (define (paths-error)
-    (throw* 'bad-cmdline
-            "expecting 2 arguments after `-p'/`--paths' option"))
   (define initial-seed
     '(()  #| entries |#
       0   #| verbosity |#
