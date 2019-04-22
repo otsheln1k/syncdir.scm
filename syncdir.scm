@@ -705,7 +705,6 @@
                 (map (lambda (n)
                        (cons n (glob-override-list rest-entry n)))
                      file-list)))
-            (write (*override-list*)) (newline)
             (let ((actions
                    (get-actions at bt st file-list)))
               (if (*dummy?*)
