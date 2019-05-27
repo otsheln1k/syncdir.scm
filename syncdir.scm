@@ -636,7 +636,8 @@
               ((if (eq? (stat:type (stat fn)) 'directory)
                    delete-dir
                    delete-file)
-               fn)))))))
+               fn))))))
+  (rmdir dir))
 
 (define (run-actions action names paths a-tab b-tab saved-tab)
   (case action
